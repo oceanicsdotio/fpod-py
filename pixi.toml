@@ -1,0 +1,13 @@
+[workspace]
+authors = ["Keeney <nkeeney@oceanics.io>"]
+channels = ["conda-forge"]
+name = "fpod-py"
+platforms = ["osx-arm64"]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+pandas = ">=3.0.5,<4"
+numpy = ">=2.5.3,<3"
+matplotlib = ">=3.11.2,<4"
