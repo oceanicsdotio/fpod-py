@@ -1,17 +1,19 @@
 """
 Read FPOD FP1 file format
 """
+import argparse
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Dict, List
+from typing import Optional, cast
 from enum import IntEnum
-from pandas import DataFrame
+from pandas import DataFrame, Timestamp, to_timedelta
 import numpy as np
+import mmap
 
-DATAFILE = Path('/Users/keeney/Library/CloudStorage/GoogleDrive-nkeeney@hurricaneisland.net/Shared drives/Island Research /Projects & Focus Areas /2026_2025 UMaine Ocean and Climate Field Studies/Data/fpod_raw/Hurricane2026 2026 05 10 FPOD_6583 file0.FP1')
 
-HEADER_BUF_SIZE = 1024
-DATA_BUF_SIZE = 16
+HEADER_BUF_SIZE = 1024  # size of file header
+DATA_BUF_SIZE = 16  # size of each data block
+EPOCH = datetime(1900, 1, 1)  # reference epoch for logged minutes
 
 def bslice(buf: bytes, offset: int, size: int) -> bytes:
     if offset + size > len(buf):
@@ -43,50 +45,21 @@ class Header():
     fpga_ver: int
     extended_amps: bool
 
+    def __init__(self, buf: bytes):
+        self.pod_id = 100 * buf[3] + buf[4]
+        self.first_logged_min = int_from_bytes(buf, 256, 4, signed=True)
+        self.last_logged_min = int_from_bytes(buf, 260, 4, signed=True)
+        self.water_depth = (buf[131] << 8) + buf[132]
+        self.deployment_depth = (buf[129] << 8) + buf[130]
+        self.lat_text = string_from_bytes(buf, 133, 11)
+        self.lon_text = string_from_bytes(buf, 145, 11)
+        self.location_text = string_from_bytes(buf, 157, 30)
+        self.notes_text = string_from_bytes(buf, 188, 43)
+        self.gmt_text = string_from_bytes(buf, 232, 11)
+        self.pic_ver = buf[37]
+        self.fpga_ver = buf[39] << 8 | buf[40]
+        self.extended_amps = self.fpga_ver > 0
 
-
-class Data():
-    """
-    Size of vectors is max clicks
-    """
-    # click data
-    min: list[int]
-    microsec: list[int]
-    click_no: list[int]
-    ncyc: list[int]
-    pkat: list[int]
-    clk_ipi_range: list[int]
-    ipi_pre_max: list[int]
-    ipi_at_max: list[int]
-    khz: list[int]
-    amp_at_max: list[int]
-    amp_reversals: list[int]
-    duration: list[float]
-    has_wav: list[bool]
-
-    # environmental data
-    bat_use: list[int]
-    prior_min: list[bool]
-    next_min: list[bool]
-
-    def __init__(self):
-        self.min = []
-        self.microsec = []
-        self.click_no = []
-        self.ncyc = []
-        self.pkat = []
-        self.clk_ipi_range = []
-        self.ipi_pre_max = []
-        self.ipi_at_max = []
-        self.khz = []
-        self.amp_at_max = []
-        self.amp_reversals = []
-        self.duration = []
-        self.has_wav = []
-
-        self.bat_use = []
-        self.prior_min = []
-        self.next_min = []
 
 class Message(IntEnum):
     CLICK = 184
@@ -111,24 +84,7 @@ class Message(IntEnum):
         return super()._missing_(value)
 
 
-
-def decode_header(buf: bytes) -> Header:
-    header = Header()
-    header.pod_id = 100 * buf[3] + buf[4]
-    header.first_logged_min = int_from_bytes(buf, 256, 4, signed=True)
-    header.last_logged_min = int_from_bytes(buf, 260, 4, signed=True)
-    header.water_depth = (buf[131] << 8) + buf[132]
-    header.deployment_depth = (buf[129] << 8) + buf[130]
-    header.lat_text = string_from_bytes(buf, 133, 11)
-    header.lon_text = string_from_bytes(buf, 145, 11)
-    header.location_text = string_from_bytes(buf, 157, 30)
-    header.notes_text = string_from_bytes(buf, 188, 43)
-    header.gmt_text = string_from_bytes(buf, 232, 11)
-    header.pic_ver = buf[37]
-    header.fpga_ver = buf[39] << 8 | buf[40]
-    header.extended_amps = header.fpga_ver > 0
-    return header
-
+# Data row structure for environmental data, Big Endian
 row_type = np.dtype([
     ('message', np.uint8), # 0: message type
     ('blnk', np.uint8), # 1: blank
@@ -139,7 +95,7 @@ row_type = np.dtype([
     ('blnk3', np.uint8), # 6: blank, used for FP3 files
     ('temp_deg_c', np.uint8), # 7: temperature in degrees Celsius
     ('blnk4', np.uint8), # 8: blank, used for FP3 files
-    ('blnk5', np.uint8), # 9: blank 
+    ('blnk5', np.uint8), # 9: blank
     ('bat_use', np.uint8), # 10: flags byte
     ('bat1', np.uint8), # 11: battery
     ('bat2', np.uint8), # 12: battery
@@ -148,52 +104,41 @@ row_type = np.dtype([
     ('system_flags', np.uint8), # 15: system flags, unused
 ]).newbyteorder('>')
 
+def read_env_messages(filepath: Path, stop_after: Optional[int]) -> DataFrame:
+    with open(filepath, "rb") as fid:
+        header = Header(fid.read(HEADER_BUF_SIZE))
+        start = EPOCH + timedelta(minutes=header.first_logged_min)
+        mm = mmap.mmap(fid.fileno(), 0, access=mmap.ACCESS_READ)
 
-def read_file(filepath: Path) -> Dict[int, int]:
-    basename = filepath.stem
-    ext = filepath.suffix
-    file_size = filepath.stat().st_size
-    max_rows = (file_size - HEADER_BUF_SIZE) // DATA_BUF_SIZE
-    messages: Dict[int, int] = {}
-    env_data: List[np.ndarray] = []
-    epoch = datetime(1900, 1, 1)
+        # slice off the header, then treat the rest as fixed-size records
+        raw = np.frombuffer(mm[HEADER_BUF_SIZE:], dtype=np.uint8)
+        records = raw[: len(raw) - (len(raw) % DATA_BUF_SIZE)]
+        records = records.reshape(-1, DATA_BUF_SIZE)
 
-    with open(filepath, 'rb') as fid:
-        header_bytes = fid.read(HEADER_BUF_SIZE)
-        header = decode_header(header_bytes)
-        for attr, value in vars(header).items():
-            print(f"{attr}: {value}")
-        current_min = -1
-        start = epoch + timedelta(minutes=header.first_logged_min)
-        end = epoch + timedelta(minutes=header.last_logged_min)
-        duration = header.last_logged_min - header.first_logged_min
-        print(f"Start: {start}, End: {end}, Duration: {duration}")
+        # keep only ENV records
+        env_mask = records[:, 0] == Message.ENV
+        env_records = records[env_mask]
 
-        stop_after = 1000
+        if stop_after is not None:
+            env_records = env_records[:stop_after]
 
-        while(True):
-            buf = fid.read(DATA_BUF_SIZE)
-            if not buf or (len(buf) < DATA_BUF_SIZE):
-                break  # partial record / eof
-            msg = Message(buf[0])
-            if msg not in messages:
-                messages[msg] = 1
-            else:
-                messages[msg] += 1
-            if msg == Message.ENV:
-                current_min += 1
-                row = np.frombuffer(buf, dtype=row_type)
-                env_data.append(row)
-                # flags_byte = buf[10]
-                # data.bat_use.append((flags_byte & 2) + 1)
-                # data.prior_min.append(bool(flags_byte & 1))
-                # data.next_min.append(bool((flags_byte >> 2) & 1))
-        print(DataFrame(env_data))
-        return messages
+        # convert to structured dtype without Python row loop
+        data = np.frombuffer(env_records.tobytes(), dtype=row_type)
+
+        df = cast(DataFrame, DataFrame.from_records(data))
+        df.index = Timestamp(start) + to_timedelta(np.arange(len(df)), unit="m")
+        return df.resample("1h", closed="left", label="left").mean()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Read an FPOD FP1 file.")
+    parser.add_argument("filepath", type=Path, help="Path to the FPOD binary file")
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    counts = read_file(Path(DATAFILE))
-    print(counts)
-    # print(json.dumps(sorted(counts.items()), indent=4))
-    # print(len(counts))
+    args = parse_args()
+    start_time = datetime.now()
+    df = read_env_messages(args.filepath, stop_after=None)
+    print(df.describe())
+    print(f"Elapsed time: {datetime.now() - start_time}")
