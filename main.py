@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Optional, cast
 from enum import IntEnum
 from pandas import DataFrame, Timestamp, to_timedelta
+from matplotlib.pyplot import subplots
 import numpy as np
 import mmap
 
@@ -127,7 +128,7 @@ def read_env_messages(filepath: Path, stop_after: Optional[int]) -> DataFrame:
 
         df = cast(DataFrame, DataFrame.from_records(data))
         df.index = Timestamp(start) + to_timedelta(np.arange(len(df)), unit="m")
-        return df.resample("1h", closed="left", label="left").mean()
+        return df
 
 
 def parse_args() -> argparse.Namespace:
@@ -139,6 +140,18 @@ def parse_args() -> argparse.Namespace:
 if __name__ == "__main__":
     args = parse_args()
     start_time = datetime.now()
-    df = read_env_messages(args.filepath, stop_after=None)
+    df = read_env_messages(args.filepath, stop_after=None)[['temp_deg_c', 'angle_x']]
+    mask = df["angle_x"] < 45
+    df = df[mask]
     print(df.describe())
+    df = cast(DataFrame, df)
+    daily = df.resample("D", closed="left", label="left").mean()
+    daily = cast(DataFrame, daily)
+    fig, ax = subplots(figsize=(5, 3))
+    ax.plot(daily.index, daily['temp_deg_c'], color='black')
+    ax.plot(daily.index, daily['angle_x'], color='blue')
+    ax.tick_params("x", rotation=45, rotation_mode="xtick")
+    fig.tight_layout()
+    fig.savefig("temp_deg_c_plot.png", dpi=300, bbox_inches='tight')
+   
     print(f"Elapsed time: {datetime.now() - start_time}")
