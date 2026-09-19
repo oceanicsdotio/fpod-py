@@ -97,7 +97,7 @@ row_type = np.dtype([
     ('temp_deg_c', np.uint8), # 7: temperature in degrees Celsius
     ('blnk4', np.uint8), # 8: blank, used for FP3 files
     ('blnk5', np.uint8), # 9: blank
-    ('bat_use', np.uint8), # 10: flags byte
+    ('flags', np.uint8), # 10: flags byte
     ('bat1', np.uint8), # 11: battery
     ('bat2', np.uint8), # 12: battery
     ('annotation_code', np.uint8), # 13: annotation code, FP3
