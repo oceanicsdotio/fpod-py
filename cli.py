@@ -162,6 +162,25 @@ click_row = np.dtype([
     ('sonar_found', np.uint8), # 15: sonar found
 ]).newbyteorder('>')
 
+wav_row = np.dtype([
+    ('message', np.uint8), # 0: high byte of timestamp; also the click record type in 0..183
+    ('ipi1', np.uint8), # 1: 
+    ('spl1', np.uint8), # 2: 
+    ('ipi2', np.uint8), # 3: 
+    ('spl2', np.uint8), # 4: 
+    ('ipi3', np.uint8), # 5: 
+    ('spl3', np.uint8), # 6: 
+    ('ipi4', np.uint8), # 7: 
+    ('spl4', np.uint8), # 8: 
+    ('ipi5', np.uint8), # 9: 
+    ('spl5', np.uint8), # 10: 
+    ('ipi6', np.uint8), # 11: 
+    ('spl6', np.uint8), # 12: 
+    ('ipi7', np.uint8), # 13: 
+    ('spl7', np.uint8), # 14: 
+    ('blnk', np.uint8), # 15: unused
+]).newbyteorder('>')
+
 
 def read_env_messages(filepath: Path) -> DataFrame:
     with open(filepath, "rb") as fid:
@@ -187,7 +206,7 @@ def filled_timestamp_column(
 ):
     msg = records['ts_hi']
     ts_mask = (msg == Message.TIMESTAMP)
-    dts = np.full(len(records), np.datetime64("NaT"), dtype="datetime64[ns]")
+    dts = np.full(len(records), np.datetime64("NaT"), dtype="datetime64[us]")
     start = np.datetime64(EPOCH + timedelta(minutes=first_logged_min))
     ts_positions = np.flatnonzero(ts_mask)
     if len(ts_positions):
@@ -216,6 +235,21 @@ def read_click_messages(filepath: Path) -> DataFrame:
     ), dtype="timedelta64[us]")
     return df[click_mask]
 
+def read_wav_messages(filepath: Path) -> DataFrame:
+    with open(filepath, "rb") as fid:
+        header = Header(fid.read(HEADER_BUF_SIZE))
+        mm = mmap(fid.fileno(), 0, access=ACCESS_READ)
+        nbytes = mm.size() - HEADER_BUF_SIZE
+        raw = np.frombuffer(
+            mm,
+            dtype=wav_row,
+            count = nbytes // DATA_BUF_SIZE,
+            offset = HEADER_BUF_SIZE
+        )
+    wav_mask = raw["message"] == Message.WAV
+    df = DataFrame.from_records(raw)
+    return df[wav_mask]
+
 
 @fpod.command("env")
 @argument("filepath", type=Path, help="Path to the FPOD binary file")
@@ -243,6 +277,36 @@ def fpod_clicks(filepath: Path, stop_after: Optional[int]):
     df = read_click_messages(filepath)[["ncyc"]]
 
     print(df.head(50))
+    # print(df.describe())
+
+
+
+@fpod.command("wav")
+@argument("filepath", type=Path, help="Path to the FPOD binary file")
+@option("--stop-after", type=int, help="Stop after reading this many records")
+def fpod_wav(filepath: Path, stop_after: Optional[int]):
+    df = read_wav_messages(filepath)
+    row = df.iloc[0]
+    ipi = row[["ipi1", "ipi2", "ipi3", "ipi4", "ipi5", "ipi6", "ipi7"]].to_numpy(dtype=float) * 250e-9
+    time = np.r_[0, np.cumsum(ipi)]
+    freq = 1 / ipi
+    spl = row[["spl1", "spl2", "spl3", "spl4", "spl5", "spl6", "spl7"]].to_numpy(dtype=float) / 255.0
+    sample_rate = 1_000_000  # 1 MHz
+    t = np.arange(0, time[-1], 1 / sample_rate)
+
+    cycle_index = np.searchsorted(time[1:], t, side="right")
+    frequency = freq[cycle_index]
+    amplitude = spl[cycle_index]
+
+    phase = 2 * np.pi * np.cumsum(frequency) / sample_rate
+    signal = amplitude * np.sin(phase)
+
+    # print(df.head(5))
+    fig, ax = subplots(figsize=(5, 3))
+    ax.plot(t, signal, color='black')
+    ax.tick_params("x", rotation=45, rotation_mode="xtick")
+    fig.tight_layout()
+    fig.savefig("synthetic_waveform_plot.png", dpi=300, bbox_inches='tight')
     # print(df.describe())
 
 if __name__ == "__main__":
