@@ -11,3 +11,6 @@ version = "0.1.0"
 pandas = ">=3.0.5,<4"
 numpy = ">=2.5.3,<3"
 matplotlib = ">=3.11.2,<4"
+
+[pypi-dependencies]
+click = ">=8.5.0, <9"
